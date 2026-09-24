@@ -70,26 +70,53 @@ def download(config, output):
             proc.stdout.close()
         if folder.exists():shutil.rmtree(folder)
 
-def ask(label,default=''):
-    value=input(label+(f' [{default}]' if default else '')+'：').strip()
-    return value or default
+GATEWAY_IP = '100.89.168.79'
+GATEWAY_USER = 'steven'
+DATASET_ROOT = '/mnt/data/benyun/yubi-corl2026-umi-arena'
+REMOTE_PYTHON = '/home/benyun/.venvs/umi_arena_pi05/bin/python'
+
+def on_gateway():
+    # Check the effective account AND an address assigned to this host.
+    # A local account called steven or SSH_CONNECTION alone is insufficient.
+    try:
+        import pwd
+        if pwd.getpwuid(os.geteuid()).pw_name != GATEWAY_USER:return False
+    except (ImportError,KeyError):return False
+    for command in [['ip','-j','address','show'],['tailscale','ip','-4']]:
+        try:
+            result=subprocess.run(command,capture_output=True,text=True,timeout=3,check=True)
+            if command[0]=='ip':
+                addresses={a.get('local') for interface in json.loads(result.stdout) for a in interface.get('addr_info',[])}
+            else:addresses=set(result.stdout.split())
+            if GATEWAY_IP in addresses:return True
+        except (OSError,subprocess.SubprocessError,ValueError,TypeError,AttributeError):continue
+    return False
+
+def route(at_gateway):
+    return dict(ssh_host='8xA100' if at_gateway else GATEWAY_USER+'@'+GATEWAY_IP,
+                ssh_hops=['8xA100'] if at_gateway else ['8xA100','8xA100'],
+                dataset_root=DATASET_ROOT,remote_python=REMOTE_PYTHON)
+
+def preflight(config):
+    video_cache.CONFIG=config
+    code="import av,numpy,scipy,pyarrow;from pathlib import Path; p=Path("+repr(config['dataset_root'])+"); assert (p/'meta/info.json').is_file() and (p/'data').is_dir() and (p/'videos').is_dir(), 'Dataset missing';print('YUBI connection ready')"
+    subprocess.run(video_cache.command(code),check=True,timeout=60)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',default='config.local.json');p.add_argument('--output',default='data');a=p.parse_args()
     conf=Path(a.config).expanduser().resolve();output=Path(a.output).expanduser().resolve()
     if conf.exists() or output.exists():raise ValueError('配置或 data 目录已存在。已有配置可直接启动；重新准备请用 --config 和 --output 指定新路径。')
-    host=ask('本机平时 SSH 登录的入口（用户名@地址，或 SSH 别名）')
-    hops=ask('登录入口后依次执行的 SSH 别名，用空格分隔；直连最终服务器填 -','8xA100 8xA100')
-    dataset=ask('最终服务器上的数据集完整路径')
-    python=ask('最终服务器的 Python（需有 numpy、scipy、pyarrow、av）','python3')
-    if not host or host.startswith('-') or not dataset:raise ValueError('请填写 SSH 入口和数据集路径')
-    hops=[] if hops=='-' else shlex.split(hops)
-    if any(h.startswith('-') for h in hops):raise ValueError('SSH 别名不应以 - 开头')
+    at_gateway=on_gateway()
+    config=route(at_gateway)
     sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
     socket=sockets/('yubi-'+str(os.getpid())+'.sock')
-    print('按平时方式登录第一跳；若询问密码，请直接输入（不保存密码）。',flush=True)
-    subprocess.run(['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no','-fN',host],check=True)
-    config=dict(data_root=os.path.relpath(output,conf.parent),dataset_root=dataset,video_cache='./.cache/videos',ssh_host=host,ssh_hops=hops,remote_python=python,ssh_control_path=str(socket),host='127.0.0.1',port=8768)
+    print('已识别 steven 跳板机，直接免密连接 A100。' if at_gateway else '正在登录 steven@100.89.168.79；若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
+    command=['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no']
+    if at_gateway:command+=['-o','BatchMode=yes']
+    command+=['-fN',config['ssh_host']]
+    subprocess.run(command,check=True)
+    config.update(data_root=os.path.relpath(output,conf.parent),video_cache='./.cache/videos',ssh_control_path=str(socket),host='127.0.0.1',port=8768)
+    preflight(config)
     result=download(config,output)
     conf.parent.mkdir(parents=True,exist_ok=True)
     with conf.open('x') as f:json.dump(config,f,ensure_ascii=False,indent=2)
