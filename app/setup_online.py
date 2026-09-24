@@ -119,24 +119,38 @@ def find_shared():
             except (OSError,subprocess.SubprocessError):pass
     return None
 
+def find_direct():
+    """Use the user's SSH alias/config without requiring a particular gateway."""
+    for hops in [[], ['8xA100'], ['8xA100','8xA100']]:
+        config=dict(ssh_host='8xA100', ssh_hops=hops,
+                    remote_python=REMOTE_PYTHON, dataset_root=DATASET_ROOT)
+        video_cache.CONFIG=config
+        probe="from pathlib import Path; assert (Path("+repr(DATASET_ROOT)+")/'meta/info.json').is_file(); print('YUBI_DIRECT_READY')"
+        try:
+            result=subprocess.run(video_cache.command(probe),capture_output=True,text=True,timeout=8)
+            if result.returncode==0 and result.stdout.strip()=='YUBI_DIRECT_READY':return config
+        except (OSError,subprocess.SubprocessError):pass
+    return None
+
 def preflight(config):
     video_cache.CONFIG=config
     code="import av,numpy,scipy,pyarrow;from pathlib import Path; p=Path("+repr(config['dataset_root'])+"); assert (p/'meta/info.json').is_file() and (p/'data').is_dir() and (p/'videos').is_dir(), 'Dataset missing';print('YUBI connection ready')"
-    subprocess.run(video_cache.command(code),check=True,timeout=60)
+    result=subprocess.run(video_cache.command(code),capture_output=True,text=True,timeout=60)
+    if result.returncode:raise RuntimeError('无法读取 A100 数据，请确认 SSH 连接和数据访问权限。')
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',default='config.local.json');p.add_argument('--output',default='data');a=p.parse_args()
     conf=Path(a.config).expanduser().resolve();output=Path(a.output).expanduser().resolve()
     if conf.exists() or output.exists():raise ValueError('配置或 data 目录已存在。已有配置可直接启动；重新准备请用 --config 和 --output 指定新路径。')
-    print('正在查找已有的共享 SSH 连接…',flush=True)
-    config=find_shared()
+    print('正在连接 A100…',flush=True)
+    config=find_direct() or find_shared()
     if config:
-        print('已复用现有 SSH 连接，自动确认 A100 数据路径。',flush=True)
+        print('A100 已连接。',flush=True)
     else:
         at_gateway=on_gateway();config=route(at_gateway)
         sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
         socket=sockets/('yubi-'+str(os.getpid())+'.sock')
-        print('已识别 steven 跳板机，直接免密连接 A100。' if at_gateway else '未找到可复用连接。正在登录 steven@100.89.168.79；若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
+        print('若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
         command=['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no']
         if at_gateway:command+=['-o','BatchMode=yes']
         command+=['-fN',config['ssh_host']]
@@ -148,7 +162,7 @@ def main():
     conf.parent.mkdir(parents=True,exist_ok=True)
     with conf.open('x') as f:json.dump(config,f,ensure_ascii=False,indent=2)
     print(f'完成：{result["recordings"]} 条记录。配置保存到 {conf.name}。')
-    print('启动：python viewer.py --config '+shlex.quote(str(conf)))
+    print('启动：python viewer.py'+('' if a.config=='config.local.json' else ' --config '+shlex.quote(str(conf))))
 
 if __name__=='__main__':
     try:main()
