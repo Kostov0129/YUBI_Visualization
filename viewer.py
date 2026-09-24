@@ -25,7 +25,9 @@ def main():
         check=subprocess.run(['ssh','-S',c['ssh_control_path'],'-O','check',c['ssh_host']],capture_output=True)
         if check.returncode==0:print('SSH 连接可用。');return
         if c.get('shared_connection'):raise ValueError('原共享 SSH 连接已关闭，请在原终端重新建立同一路线的共享连接后重试。')
-        subprocess.run(['ssh','-M','-S',c['ssh_control_path'],'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no','-fN',c['ssh_host']],check=True)
+        flags=['-M','-S',c['ssh_control_path'],'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no','-fN']
+        command=(['tailscale','ssh',c['ssh_host']]+flags if c.get('ssh_transport')=='tailscale' else ['ssh']+flags+[c['ssh_host']])
+        subprocess.run(command,check=True)
         print('SSH 已连接，可以启动查看器。');return
     from http_server import main as serve
     serve()
