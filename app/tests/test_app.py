@@ -77,4 +77,30 @@ class AppTest(unittest.TestCase):
    self.assertAlmostEqual(float(frames[0].to_ndarray(format='rgb24').mean()),21,delta=5)
    self.assertAlmostEqual(float(frames[3].to_ndarray(format='rgb24').mean()),105,delta=5)
 
+
+class SetupRouteTest(unittest.TestCase):
+ def test_gateway_requires_account_and_local_address(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as setup
+  with patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='steven')), patch.object(setup.subprocess,'run',return_value=SimpleNamespace(stdout='[{"addr_info":[{"local":"100.89.168.79"}]}]')):
+   self.assertTrue(setup.on_gateway())
+  with patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='steven')), patch.object(setup.subprocess,'run',return_value=SimpleNamespace(stdout='[]')):
+   self.assertFalse(setup.on_gateway())
+  with patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='someone')), patch.object(setup.subprocess,'run') as run:
+   self.assertFalse(setup.on_gateway());run.assert_not_called()
+ def test_gateway_probe_failure_uses_normal_login(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as setup
+  with patch('pwd.getpwuid',return_value=SimpleNamespace(pw_name='steven')),patch.object(setup.subprocess,'run',side_effect=FileNotFoundError):
+   self.assertFalse(setup.on_gateway())
+ def test_routes_keep_two_hops_after_gateway(self):
+  import setup_online as setup
+  direct=setup.route(True);local=setup.route(False)
+  self.assertEqual([direct['ssh_host'],*direct['ssh_hops']],['8xA100','8xA100'])
+  self.assertEqual([local['ssh_host'],*local['ssh_hops']],['steven@100.89.168.79','8xA100','8xA100'])
+  self.assertEqual(direct['dataset_root'],local['dataset_root'])
+  self.assertEqual(direct['remote_python'],local['remote_python'])
+
 if __name__=='__main__':unittest.main()
