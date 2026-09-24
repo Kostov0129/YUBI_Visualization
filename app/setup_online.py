@@ -119,18 +119,78 @@ def find_shared():
             except (OSError,subprocess.SubprocessError):pass
     return None
 
-def find_direct():
-    """Use the user's SSH alias/config without requiring a particular gateway."""
+def discover(config):
+    # A login alone is insufficient: find the host with the actual dataset.
     for hops in [[], ['8xA100'], ['8xA100','8xA100']]:
-        config=dict(ssh_host='8xA100', ssh_hops=hops,
-                    remote_python=REMOTE_PYTHON, dataset_root=DATASET_ROOT)
-        video_cache.CONFIG=config
-        probe="from pathlib import Path; assert (Path("+repr(DATASET_ROOT)+")/'meta/info.json').is_file(); print('YUBI_DIRECT_READY')"
+        candidate=dict(config,ssh_hops=hops)
+        video_cache.CONFIG=candidate
+        probe="from pathlib import Path; p=Path("+repr(DATASET_ROOT)+"); assert (p/'meta/info.json').is_file() and (p/'data').is_dir() and (p/'videos').is_dir(); print('YUBI_READY')"
         try:
-            result=subprocess.run(video_cache.command(probe),capture_output=True,text=True,timeout=8)
-            if result.returncode==0 and result.stdout.strip()=='YUBI_DIRECT_READY':return config
-        except (OSError,subprocess.SubprocessError):pass
+            result=subprocess.run(video_cache.command(probe),stdin=subprocess.DEVNULL,
+                                  capture_output=True,text=True,timeout=8)
+            if result.returncode==0 and result.stdout.strip()=='YUBI_READY':return candidate
+            # Authentication/name resolution failures cannot be fixed by extra hops.
+            if result.returncode==255:break
+        except (OSError,subprocess.SubprocessError):break
     return None
+
+def connection_candidates():
+    common=dict(remote_python=REMOTE_PYTHON,dataset_root=DATASET_ROOT)
+    candidates=[dict(common,ssh_host='8xA100'),
+                dict(common,ssh_host=GATEWAY_USER+'@'+GATEWAY_IP)]
+    if shutil.which('tailscale'):
+        candidates.append(dict(common,ssh_host='8xA100',ssh_transport='tailscale'))
+    return candidates
+
+def find_direct():
+    return discover(connection_candidates()[0])
+
+def login(config):
+    """Keep authentication in the SSH terminal; persist only a control socket."""
+    sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
+    import uuid
+    socket=sockets/('yubi-'+uuid.uuid4().hex[:12]+'.sock')
+    flags=['-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=8',
+           '-o','ConnectionAttempts=1','-o','NumberOfPasswordPrompts=1',
+           '-o','LogLevel=QUIET','-o','RemoteCommand=none','-o','RequestTTY=no','-fN']
+    command=(['tailscale','ssh',config['ssh_host']]+flags if config.get('ssh_transport')=='tailscale'
+             else ['ssh']+flags+[config['ssh_host']])
+    candidate=dict(config,ssh_control_path=str(socket))
+    keep=False
+    try:
+        result=subprocess.run(command,timeout=120)
+        if result.returncode:return None
+        found=discover(candidate)
+        if found:keep=True;return found
+    except (OSError,subprocess.SubprocessError):pass
+    finally:
+        if not keep:
+            try:subprocess.run(['ssh','-S',str(socket),'-O','exit',config['ssh_host']],capture_output=True,timeout=3)
+            except (OSError,subprocess.SubprocessError):pass
+    return None
+
+def connect():
+    shared=find_shared()
+    if shared:return shared
+    candidates=connection_candidates()
+    for candidate in candidates:
+        found=discover(candidate)
+        if found:return found
+    print('需要验证登录时，请按提示操作；密码不会保存。',flush=True)
+    for candidate in candidates:
+        found=login(candidate)
+        if found:return found
+    print('自动连接未成功。请先确认能通过 SSH 登录数据所在服务器。',flush=True)
+    if not sys.stdin.isatty():
+        raise RuntimeError('请在本机交互式终端重新运行 python viewer.py --setup。')
+    host=input('请输入登录地址（如 用户名@IP，直接回车退出）：').strip()
+    if not host:raise RuntimeError('未连接到数据服务器，请确认 SSH 登录后重试。')
+    if host.startswith('-') or any(ch.isspace() for ch in host):
+        raise ValueError('只输入主机别名或 用户名@IP，不要输入整条命令。')
+    custom=dict(ssh_host=host,remote_python=REMOTE_PYTHON,dataset_root=DATASET_ROOT)
+    found=discover(custom) or login(custom)
+    if not found:raise RuntimeError('无法登录或读取数据目录，请确认该账号的数据访问权限。')
+    return found
 
 def preflight(config):
     video_cache.CONFIG=config
@@ -143,19 +203,8 @@ def main():
     conf=Path(a.config).expanduser().resolve();output=Path(a.output).expanduser().resolve()
     if conf.exists() or output.exists():raise ValueError('配置或 data 目录已存在。已有配置可直接启动；重新准备请用 --config 和 --output 指定新路径。')
     print('正在连接 A100…',flush=True)
-    config=find_direct() or find_shared()
-    if config:
-        print('A100 已连接。',flush=True)
-    else:
-        at_gateway=on_gateway();config=route(at_gateway)
-        sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
-        socket=sockets/('yubi-'+str(os.getpid())+'.sock')
-        print('若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
-        command=['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no']
-        if at_gateway:command+=['-o','BatchMode=yes']
-        command+=['-fN',config['ssh_host']]
-        subprocess.run(command,check=True)
-        config['ssh_control_path']=str(socket)
+    config=connect()
+    print('A100 已连接。',flush=True)
     config.update(data_root=os.path.relpath(output,conf.parent),video_cache='./.cache/videos',host='127.0.0.1',port=8768)
     preflight(config)
     result=download(config,output)

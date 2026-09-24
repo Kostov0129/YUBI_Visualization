@@ -52,6 +52,8 @@ def command(code):
   inner='ssh -T -o RemoteCommand=none -o RequestTTY=no -o BatchMode=yes -o ConnectTimeout=15 '+shlex.quote(hop)+' '+shlex.quote(inner)
  args=['ssh','-T','-o','RemoteCommand=none','-o','RequestTTY=no','-o','BatchMode=yes','-o','ConnectTimeout=15']
  if CONFIG.get('ssh_control_path'):args+=['-S',str(pathlib.Path(CONFIG['ssh_control_path']).expanduser())]
+ if CONFIG.get('ssh_transport')=='tailscale':
+  return ['tailscale','ssh',CONFIG['ssh_host']]+args[1:]+[inner]
  return args+[CONFIG['ssh_host'],inner]
 
 def run(group):
