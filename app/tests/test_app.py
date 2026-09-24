@@ -49,9 +49,16 @@ class AppTest(unittest.TestCase):
   import hashlib
   def snapshot():return {str(p.relative_to(self.source)):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.source.rglob('*') if p.is_file()}
   before=snapshot()
-  result=download({'dataset_root':str(self.source)},self.out)
+  data_file=self.source/'data/file.parquet';hidden=self.source/'held.parquet';data_file.rename(hidden)
+  try:result=download({'dataset_root':str(self.source)},self.out)
+  finally:hidden.rename(data_file)
+  self.assertFalse(list(self.out.glob('*.npy')))
+  self.assertTrue((self.out/'lazy.json').exists())
   self.assertEqual(result['recordings'],2)
-  self.assertEqual(Dataset(self.out).data('cup-record')['frames'],6)
+  self.assertEqual(Dataset(self.out,config={'dataset_root':str(self.source)}).data('cup-record')['frames'],6)
+  from unittest.mock import patch
+  with patch('lazy_reader.subprocess.run',side_effect=AssertionError('cached record should not reconnect')):
+   self.assertEqual(Dataset(self.out,config={'dataset_root':str(self.source)}).data('cup-record')['frames'],6)
   self.assertEqual(snapshot(),before)
   self.assertFalse(any(self.source.rglob('.yubi*')))
  def test_online_interruption_and_path_rejection(self):
@@ -102,5 +109,33 @@ class SetupRouteTest(unittest.TestCase):
   self.assertEqual([local['ssh_host'],*local['ssh_hops']],['steven@100.89.168.79','8xA100','8xA100'])
   self.assertEqual(direct['dataset_root'],local['dataset_root'])
   self.assertEqual(direct['remote_python'],local['remote_python'])
+
+class LocalAddressTest(unittest.TestCase):
+ def test_default_port_collision_selects_free_loopback_port(self):
+  from http.server import BaseHTTPRequestHandler
+  from http_server import bind_server
+  first=bind_server('127.0.0.1',0,BaseHTTPRequestHandler)
+  try:
+   second=bind_server('127.0.0.1',first.server_port,BaseHTTPRequestHandler)
+   try:
+    self.assertEqual(second.server_address[0],'127.0.0.1')
+    self.assertNotEqual(second.server_port,first.server_port)
+   finally:second.server_close()
+   with self.assertRaises(OSError):bind_server('127.0.0.1',first.server_port,BaseHTTPRequestHandler,False)
+  finally:first.server_close()
+
+class SharedConnectionTest(unittest.TestCase):
+ def test_reuses_direct_shared_connection_before_gateway(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as setup
+  with patch.object(setup,'shared_sockets',return_value=['/tmp/example.sock']),patch.object(setup.subprocess,'run',side_effect=[SimpleNamespace(returncode=0),SimpleNamespace(returncode=0,stdout='YUBI_SHARED_READY\n')]):
+   c=setup.find_shared();self.assertEqual(c['ssh_hops'],[]);self.assertTrue(c['shared_connection'])
+ def test_unavailable_socket_is_not_treated_as_logged_in(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as setup
+  with patch.object(setup,'shared_sockets',return_value=['/tmp/example.sock']),patch.object(setup.subprocess,'run',return_value=SimpleNamespace(returncode=255)):
+   self.assertIsNone(setup.find_shared())
 
 if __name__=='__main__':unittest.main()
