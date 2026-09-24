@@ -2,7 +2,7 @@
 from http.server import ThreadingHTTPServer,SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse,parse_qs,unquote
-import argparse,json,gzip,re,functools
+import argparse,json,gzip,re,functools,errno
 from storage import Dataset
 import video_cache
 ROOT=Path(__file__).resolve().parent;PUBLIC=ROOT/'public'
@@ -73,8 +73,15 @@ class Handler(SimpleHTTPRequestHandler):
   except (BrokenPipeError,ConnectionResetError):pass
  def log_message(self,*args):pass
 
+def bind_server(host,port,handler,allow_fallback=True):
+ try:return ThreadingHTTPServer((host,port),handler)
+ except OSError as e:
+  if not allow_fallback or e.errno!=errno.EADDRINUSE:raise
+  return ThreadingHTTPServer((host,0),handler)
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('--config',default='config.local.json');p.add_argument('--host');p.add_argument('--port',type=int);a=p.parse_args();config=load_config(a.config);dataset=Dataset(config['data_root']);video_cache.configure(config,dataset.root)
+ p=argparse.ArgumentParser();p.add_argument('--config',default='config.local.json');p.add_argument('--host');p.add_argument('--port',type=int);a=p.parse_args();config=load_config(a.config);dataset=Dataset(config['data_root'],config=config);video_cache.configure(config,dataset.root)
  host=a.host or config.get('host','127.0.0.1');port=a.port or config.get('port',8768)
- print(f'YUBI viewer: http://{host}:{port}',flush=True);ThreadingHTTPServer((host,port),functools.partial(Handler,dataset=dataset)).serve_forever()
+ server=bind_server(host,port,functools.partial(Handler,dataset=dataset),allow_fallback=a.port is None)
+ actual=server.server_address[1];print(f'本机查看地址：http://{host}:{actual}/\n请在运行本程序的本机浏览器打开上面的地址。',flush=True);server.serve_forever()
 if __name__=='__main__':main()

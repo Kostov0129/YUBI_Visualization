@@ -3,28 +3,10 @@ import argparse, io, json, os, shlex, shutil, subprocess, sys, tempfile
 from pathlib import Path
 import video_cache
 
-ALLOWED = {'cup_poses.npy','cup_angles.npy','smartphone_poses.npy','smartphone_angles.npy','groups.json','episode_metadata.json','cache_manifest.json'}
-REMOTE_END = r'''
-import io, sys, av
-import pyarrow
-pyarrow.set_cpu_count(2)
-def send(name, obj):
-    if isinstance(obj,np.ndarray):
-        header=io.BytesIO()
-        np.lib.format.write_array_header_1_0(header,dict(descr=np.lib.format.dtype_to_descr(obj.dtype),fortran_order=False,shape=obj.shape))
-        prefix=header.getvalue(); payload=memoryview(obj).cast('B')
-    else:
-        prefix=b'';payload=json.dumps(obj,ensure_ascii=False).encode()
-    sys.stdout.buffer.write((json.dumps({'file':name,'size':len(prefix)+len(payload)})+'\n').encode())
-    sys.stdout.buffer.write(prefix);sys.stdout.buffer.write(payload);sys.stdout.buffer.flush()
-print('正在扫描服务器轨迹，原始视频不会下载。请等待完成。',file=sys.stderr,flush=True)
-manifest=prepare(DATASET,emit=send)
-sys.stdout.buffer.write((json.dumps({'done':manifest})+'\n').encode());sys.stdout.buffer.flush()
-'''
-
+ALLOWED = {'cup_poses.npy','cup_angles.npy','smartphone_poses.npy','smartphone_angles.npy','groups.json','episode_metadata.json','cache_manifest.json','lazy.json'}
 def remote_code(dataset):
-    source=Path(__file__).with_name('prepare_data.py').read_text()
-    return "__name__='yubi_remote'\nDATASET="+repr(dataset)+'\n'+source+'\n'+REMOTE_END
+    from lazy_reader import INDEX_CODE
+    return 'DATASET='+repr(dataset)+'\n'+INDEX_CODE
 
 def receive(stream, folder):
     seen=set()
@@ -34,7 +16,8 @@ def receive(stream, folder):
         header=json.loads(line)
         if 'done' in header:
             needed={'groups.json','episode_metadata.json','cache_manifest.json'}
-            for task in header['done']['frames']:
+            if header['done'].get('lazy'):needed.add('lazy.json')
+            for task in ([] if header['done'].get('lazy') else header['done']['frames']):
                 name='smartphone' if task=='phone' else task
                 needed.update({name+'_poses.npy',name+'_angles.npy'})
             if seen!=needed: raise RuntimeError('缓存文件不完整')
@@ -62,7 +45,7 @@ def download(config, output):
         manifest=receive(proc.stdout,folder)
         if proc.wait(timeout=30)!=0: raise RuntimeError('SSH 执行失败，未保存配置')
         from storage import Dataset
-        Dataset(folder)
+        Dataset(folder,config=config)
         folder.rename(output);return manifest
     finally:
         if proc is not None:
@@ -72,7 +55,7 @@ def download(config, output):
 
 GATEWAY_IP = '100.89.168.79'
 GATEWAY_USER = 'steven'
-DATASET_ROOT = '/mnt/data/benyun/yubi-corl2026-umi-arena'
+DATASET_ROOT = '/mnt/data/benyun/workspace/yubi-corl2026-umi-arena'
 REMOTE_PYTHON = '/home/benyun/.venvs/umi_arena_pi05/bin/python'
 
 def on_gateway():
@@ -97,6 +80,45 @@ def route(at_gateway):
                 ssh_hops=['8xA100'] if at_gateway else ['8xA100','8xA100'],
                 dataset_root=DATASET_ROOT,remote_python=REMOTE_PYTHON)
 
+def shared_sockets():
+    candidates=[Path.home()/'.ssh/yubi-shared.sock',Path.home()/'.cache/umi-video.sock']
+    candidates+=sorted((Path.home()/'.ssh').glob('yubi-*.sock'),key=lambda p:p.stat().st_mtime,reverse=True)
+    # Include explicit ControlPath sockets used by existing local SSH windows.
+    try:
+        output=subprocess.run(['ps','-u',str(os.getuid()),'-o','args='],capture_output=True,text=True,timeout=3,check=True).stdout
+        for line in output.splitlines():
+            try:args=shlex.split(line)
+            except ValueError:continue
+            if not args or Path(args[0]).name!='ssh':continue
+            for i,arg in enumerate(args):
+                if arg=='-S' and i+1<len(args):candidates.append(Path(args[i+1]).expanduser())
+                elif arg.startswith('ControlPath='):candidates.append(Path(arg.split('=',1)[1]).expanduser())
+                elif arg.startswith('-oControlPath='):candidates.append(Path(arg.split('=',1)[1]).expanduser())
+    except (OSError,subprocess.SubprocessError):pass
+    out=[]
+    for p in candidates:
+        try:
+            if p.is_socket() and p.stat().st_uid==os.getuid() and str(p) not in out:out.append(str(p))
+        except OSError:pass
+    return out[:8]
+
+def find_shared():
+    for socket in shared_sockets():
+        host=GATEWAY_USER+'@'+GATEWAY_IP
+        try:
+            result=subprocess.run(['ssh','-S',socket,'-O','check',host],capture_output=True,timeout=2)
+            if result.returncode:continue
+        except (OSError,subprocess.SubprocessError):continue
+        for hops in [[],['8xA100'],['8xA100','8xA100']]:
+            config=dict(ssh_host=host,ssh_control_path=socket,ssh_hops=hops,remote_python=REMOTE_PYTHON,dataset_root=DATASET_ROOT,shared_connection=True)
+            video_cache.CONFIG=config
+            try:
+                probe="from pathlib import Path; assert (Path("+repr(DATASET_ROOT)+")/'meta/info.json').is_file(); print('YUBI_SHARED_READY')"
+                result=subprocess.run(video_cache.command(probe),capture_output=True,text=True,timeout=8)
+                if result.returncode==0 and result.stdout.strip()=='YUBI_SHARED_READY':return config
+            except (OSError,subprocess.SubprocessError):pass
+    return None
+
 def preflight(config):
     video_cache.CONFIG=config
     code="import av,numpy,scipy,pyarrow;from pathlib import Path; p=Path("+repr(config['dataset_root'])+"); assert (p/'meta/info.json').is_file() and (p/'data').is_dir() and (p/'videos').is_dir(), 'Dataset missing';print('YUBI connection ready')"
@@ -106,16 +128,21 @@ def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--config',default='config.local.json');p.add_argument('--output',default='data');a=p.parse_args()
     conf=Path(a.config).expanduser().resolve();output=Path(a.output).expanduser().resolve()
     if conf.exists() or output.exists():raise ValueError('配置或 data 目录已存在。已有配置可直接启动；重新准备请用 --config 和 --output 指定新路径。')
-    at_gateway=on_gateway()
-    config=route(at_gateway)
-    sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
-    socket=sockets/('yubi-'+str(os.getpid())+'.sock')
-    print('已识别 steven 跳板机，直接免密连接 A100。' if at_gateway else '正在登录 steven@100.89.168.79；若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
-    command=['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no']
-    if at_gateway:command+=['-o','BatchMode=yes']
-    command+=['-fN',config['ssh_host']]
-    subprocess.run(command,check=True)
-    config.update(data_root=os.path.relpath(output,conf.parent),video_cache='./.cache/videos',ssh_control_path=str(socket),host='127.0.0.1',port=8768)
+    print('正在查找已有的共享 SSH 连接…',flush=True)
+    config=find_shared()
+    if config:
+        print('已复用现有 SSH 连接，自动确认 A100 数据路径。',flush=True)
+    else:
+        at_gateway=on_gateway();config=route(at_gateway)
+        sockets=Path.home()/'.ssh';sockets.mkdir(mode=0o700,exist_ok=True)
+        socket=sockets/('yubi-'+str(os.getpid())+'.sock')
+        print('已识别 steven 跳板机，直接免密连接 A100。' if at_gateway else '未找到可复用连接。正在登录 steven@100.89.168.79；若提示密码，请输入 SSH 登录密码（不保存密码）。',flush=True)
+        command=['ssh','-M','-S',str(socket),'-o','ControlPersist=2h','-o','ConnectTimeout=20','-o','RemoteCommand=none','-o','RequestTTY=no']
+        if at_gateway:command+=['-o','BatchMode=yes']
+        command+=['-fN',config['ssh_host']]
+        subprocess.run(command,check=True)
+        config['ssh_control_path']=str(socket)
+    config.update(data_root=os.path.relpath(output,conf.parent),video_cache='./.cache/videos',host='127.0.0.1',port=8768)
     preflight(config)
     result=download(config,output)
     conf.parent.mkdir(parents=True,exist_ok=True)

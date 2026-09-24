@@ -8,13 +8,16 @@ def poses_to_matrix(v):
  out=np.tile(np.eye(4),(len(v),1,1));out[:,:3,3]=v[:,:3];out[:,:3,:3]=Rotation.from_quat(v[:,3:]).as_matrix();return out
 
 class Dataset:
- def __init__(self,root):
+ def __init__(self,root,config=None):
   self.root=Path(root).expanduser().resolve()
   def choose(*paths):return next((self.root/p for p in paths if (self.root/p).is_file()),None)
   group_path=choose('groups.json','incremental_start_refit/groups.json')
   if not group_path:raise ValueError('Missing groups.json: run prepare_data.py first')
   self.groups=json.loads(group_path.read_text());self.index={g['uuid']:g for g in self.groups}
-  self.poses={t:np.load(self.root/(f+'_poses.npy'),mmap_mode='r') for t,f in [('cup','cup'),('phone','smartphone')] if any(g['task']==t for g in self.groups)}
+  self.lazy=(self.root/'lazy.json').exists();self.config=config or {};self.metadata={}
+  if self.lazy:
+   raw=json.loads((self.root/'episode_metadata.json').read_text());self.metadata={r[raw['columns'].index('episode_index')]:dict(zip(raw['columns'],r)) for r in raw['rows']}
+  self.poses={t:np.load(self.root/(f+'_poses.npy'),mmap_mode='r') for t,f in [('cup','cup'),('phone','smartphone')] if not self.lazy and any(g['task']==t for g in self.groups)}
   self.angles={t:np.load(self.root/(f+'_angles.npy'),mmap_mode='r') for t,f in [('cup','cup'),('phone','smartphone')] if t in self.poses}
   self.labels={};self.models={};self.setup={}
   labels=choose('ik/group_labels.jsonl','platform_labels_start_refit/group_labels.jsonl');models=choose('ik/models.json','models.json');setup=choose('ik/used_setup.json','incremental_start_refit/used_setup.json')
@@ -40,7 +43,12 @@ class Dataset:
   return out
  def catalog(self):return [{'uuid':g['uuid'],'task':g['task'],'frames':g['frames'],'episodes':[x[2] for x in g['chunks']]} for g in self.groups]
  def data(self,uid,mode='raw'):
-  g=self.index[uid];a=np.concatenate([self.poses[g['task']][lo:hi] for lo,hi,_,_ in g['chunks']]);angles=np.concatenate([self.angles[g['task']][lo:hi] for lo,hi,_,_ in g['chunks']])
+  g=self.index[uid]
+  if self.lazy:
+   from lazy_reader import record
+   a,angles=record(self.root,g,self.config,self.metadata)
+  else:
+   a=np.concatenate([self.poses[g['task']][lo:hi] for lo,hi,_,_ in g['chunks']]);angles=np.concatenate([self.angles[g['task']][lo:hi] for lo,hi,_,_ in g['chunks']])
   out={'uuid':uid,'task':g['task'],'frames':len(a),'fps':30,'episodes':a[:,:2].astype(int).tolist(),'poses':a[:,2:].round(7).tolist(),'angles':angles.round(7).tolist(),'mode':mode,'status':'原始双手 · table_origin · 轨迹单位 m','boundaries':np.cumsum([hi-lo for lo,hi,_,_ in g['chunks']]).tolist()}
   if mode=='raw':return out
   if mode not in [m['value'] for m in self.modes()]:raise ValueError('Reference IK is not configured')
