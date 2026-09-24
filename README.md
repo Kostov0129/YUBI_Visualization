@@ -1,13 +1,16 @@
-# YUBI 视频与轨迹查看器
+# YUBI 视频查看器
 
-选一条记录，同时看三个角度的视频和夹爪运动。
+**选任务 → 选记录 → 播放。** 同时查看三个角度的视频和夹爪轨迹。
 
-**有服务器账号，选「在线查看」；数据已下载到本机，选「本地查看」。**
+**所有命令都在本机终端的 `YUBI_Visualization` 项目目录中运行，不在 SSH 登录后的 A100 终端中运行。**
 
-<details>
-<summary>第一次使用：点击展开安装步骤（两种方式都需要）</summary>
+在线查看的关系是：**本机浏览器 → 本机查看器 → SSH → A100 数据**。因此页面地址是本机的 `127.0.0.1`；视频原件仍在 A100。
 
-在本机终端依次运行：
+只需用到一个入口：`viewer.py`。其他程序和模型放在 `app/`，不用逐个操作。
+
+## 首次安装
+
+在本机终端运行：
 
 ```bash
 git clone https://github.com/Kostov0129/YUBI_Visualization.git
@@ -17,70 +20,64 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-后面的命令也在这个项目目录中运行。
+## ① Online：数据在 A100，通过 SSH 看
 
-</details>
+在本机运行一次：
 
-## ① 在线查看：不用下载全部视频
+```bash
+python viewer.py --setup
+```
 
-1. **领取配置。** 向维护者领取 `data` 文件夹、已填好服务器信息的 `config.local.json`，以及 SSH 登录命令。把文件夹和配置文件放进项目目录。
-2. **连接服务器。** 在本机终端运行维护者提供的 SSH 登录命令，按提示登录。
-3. **打开程序。** 运行：
+按提示填写平时使用的 **SSH 登录入口、跳转方式、A100 数据集路径**。当前两次 `ssh 8xA100` 的路线已作为默认值。程序还会询问远端 Python 路径；如果 `python3` 已装有所需依赖，直接回车。
 
-   ```bash
-   source .venv/bin/activate
-   python server.py --config config.local.json
-   ```
+按平时的方式输入 SSH 登录密码，等待准备完成。程序会自动生成本机需要的轨迹缓存和配置，**不用领取文件，也不用下载完整视频库**。首次准备会读取服务器轨迹并传回约数百 MB 数据，请耐心等待；不在服务器写入缓存或修改原始文件。
 
-4. **打开页面。** 在本机浏览器访问 **http://127.0.0.1:8768/**。
+然后启动：
 
-`data` 只存轨迹和视频索引，不是完整视频库。选哪条记录，程序就从服务器取哪条视频；看过的视频会缓存在本机。已配置过的本机直接执行第 3 步，连接失效时再执行第 2 步。
+```bash
+python viewer.py
+```
+
+在本机浏览器打开 [http://127.0.0.1:8768/](http://127.0.0.1:8768/)，选记录即可看视频。
+
+## ② Local：数据已下载到本机
+
+将下面的路径换成数据集所在目录，运行一次：
+
+```bash
+python viewer.py --local /本地数据集路径
+```
+
+这个目录里应有 `meta`、`data`、`videos` 三个文件夹。程序会自动保存路径并准备轨迹。然后启动：
+
+```bash
+python viewer.py
+```
+
+在本机浏览器打开 [http://127.0.0.1:8768/](http://127.0.0.1:8768/)。这种方式不需要 SSH。
+
+## 下次使用
+
+进入项目目录后运行：
+
+```bash
+source .venv/bin/activate
+python viewer.py
+```
+
+- **在线连接过期：**先运行 `python viewer.py --connect` 重新登录，再点页面上的“重试加载”。
+- **想看某一刻：**拖动进度条，三个视频和轨迹会一起跳转。
+- **首次加载慢：**稍等，程序正在准备选中的视频。看过的视频缓存在本机。
 
 <details>
-<summary>维护者：给同事准备哪些内容？</summary>
+<summary>补充说明（遇到配置问题再看）</summary>
 
-- `data/`：`groups.json`、`episode_metadata.json`、`cup_poses.npy`、`cup_angles.npy`、`smartphone_poses.npy`、`smartphone_angles.npy`。
-- `config.local.json`：按 `config.example.json` 填写。`data_root` 用 `./data`，`video_cache` 用 `./.cache/videos`；填好服务器数据集路径、跳板机地址和远端 Python 路径（需有 `av`）。当前路线的 `ssh_hops` 是 `["8xA100", "8xA100"]`，后续两跳需可免密连接。
-- 若第一跳需要密码，配置 `ssh_control_path` 为 `~/.ssh/yubi-viewer.sock`，提供下面的登录命令，并替换其中的跳板机地址：
-
-  ```bash
-  mkdir -p ~/.ssh
-  ssh -M -S ~/.ssh/yubi-viewer.sock -o ControlPersist=2h -o RemoteCommand=none -fN steven@跳板机地址
-  ```
-
-这些资料私下交给有访问权限的同事，不提交到 GitHub。无需重新部署服务器。
+- 在线读取要求远端 Python 已有 `numpy`、`scipy`、`pyarrow`、`av`；后续 SSH 跳转沿用服务器已有免密连接。程序不会在远端安装软件。
+- `--setup` / `--local` 只需运行一次；默认生成本机 `data/` 和 `config.local.json`。已存在时不会覆盖；需重新配置可用 `--output 新目录 --config 新配置.json`，启动时也加 `--config 新配置.json`。
+- `data/` 是查看器轨迹缓存；视频缓存位于 `.cache/videos/`。这些数据和登录配置均不会上传 GitHub。
+- 本地数据可从有访问权限的 [YUBI 数据集](https://huggingface.co/datasets/airoa-org/yubi-corl2026-umi-arena) 获取。完整数据约 2.68 TB，先确认磁盘空间。
+- 本机端口 8768 被占用时，运行 `python viewer.py --port 8769`，并访问 8769。
+- 视频可能是人持 UMI 的示范画面，不一定是固定机械臂执行。
+- 验证程序：`PYTHONPATH=app python -m unittest discover -s app/tests -v`。第三方来源见 [说明](app/THIRD_PARTY_NOTICES.md)。
 
 </details>
-
-## ② 本地查看：数据已下载到本机
-
-1. **准备数据。** 下载有访问权限的 [YUBI 数据集](https://huggingface.co/datasets/airoa-org/yubi-corl2026-umi-arena)，保留 `meta`、`data`、`videos` 三个目录。完整数据约 **2.68 TB**。
-2. **填写位置。** 将 `config.example.json` 复制为 `config.local.json`，只把 `dataset_root` 改成数据集所在的完整路径，其他项保持默认。
-3. **第一次使用时，读取轨迹。** 将下面的路径换成同一个数据集路径，再运行（只做一次）：
-
-   ```bash
-   source .venv/bin/activate
-   python prepare_data.py --dataset /数据集所在路径 --output ./data
-   ```
-
-   如果已有查看器的 `data` 文件夹，请先确认它是配套缓存，不要重复生成或覆盖。
-
-4. **打开程序和页面：**
-
-   ```bash
-   source .venv/bin/activate
-   python server.py --config config.local.json
-   ```
-
-   在本机浏览器访问 **http://127.0.0.1:8768/**。这种方式不需要 SSH。
-
-## 怎么看？
-
-**选任务 → 选记录 → 等视频加载 → 点「播放」。**
-
-- 记录太多：在选择框里翻页，或输入页码。
-- 想看某一刻：拖动下面的进度条，三个视频和轨迹会一起跳转。
-- 第一次加载慢：稍等，程序正在准备这条视频。
-- 视频加载失败：在线方式先重新连接 SSH，再点「重试加载」。
-
-使用期间保持程序运行。仓库只提供查看器，不包含数据和登录资料。第三方来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
