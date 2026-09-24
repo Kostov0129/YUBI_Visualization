@@ -1,16 +1,13 @@
-# YUBI 轨迹与视频查看器
+# YUBI 视频与轨迹查看器
 
-选择任务和记录，同步查看双手轨迹、夹爪以及左腕／中间／右腕三路视频。支持「杯子放上盘子再放回」和「手机装盒」。
+选一条记录，同时看三个角度的视频和夹爪运动。
 
-**两种使用方式：① 数据在服务器，通过 SSH 在线看；② 数据已下载，设置本地路径看。**
+**有服务器账号，选「在线查看」；数据已下载到本机，选「本地查看」。**
 
-## ① Online：SSH 在线看，不下载整个数据集
+<details>
+<summary>第一次使用：点击展开安装步骤（两种方式都需要）</summary>
 
-查看器运行在数据服务器上，你在自己电脑的浏览器里观看。
-
-### 服务器端：维护者准备一次
-
-在**实际存放数据的最终服务器**上执行。如果团队已经启动了查看器，跳过这一步。
+在本机终端依次运行：
 
 ```bash
 git clone https://github.com/Kostov0129/YUBI_Visualization.git
@@ -18,103 +15,72 @@ cd YUBI_Visualization
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-
-# 替换为服务器上的数据集路径；只读原数据，生成查看器需要的轨迹缓存。
-python prepare_data.py --dataset /path/to/dataset --output ./data
-cp config.example.json config.local.json
 ```
 
-将 `config.local.json` 改为：
+后面的命令也在这个项目目录中运行。
 
-```json
-{
-  "data_root": "./data",
-  "dataset_root": "/path/to/dataset",
-  "video_cache": "./.cache/videos",
-  "host": "127.0.0.1",
-  "port": 8768
-}
-```
+</details>
 
-启动并保持运行：
+## ① 在线查看：不用下载全部视频
 
-```bash
-python server.py --config config.local.json
-```
+1. **领取配置。** 向维护者领取 `data` 文件夹、已填好服务器信息的 `config.local.json`，以及 SSH 登录命令。把文件夹和配置文件放进项目目录。
+2. **连接服务器。** 在本机终端运行维护者提供的 SSH 登录命令，按提示登录。
+3. **打开程序。** 运行：
 
-### 自己电脑：连接 SSH，然后打开浏览器
+   ```bash
+   source .venv/bin/activate
+   python server.py --config config.local.json
+   ```
 
-能直接登录最终服务器时：
+4. **打开页面。** 在本机浏览器访问 **http://127.0.0.1:8768/**。
 
-```bash
-ssh -N -o RemoteCommand=none -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:8768:127.0.0.1:8768 用户名@服务器地址
-```
+`data` 只存轨迹和视频索引，不是完整视频库。选哪条记录，程序就从服务器取哪条视频；看过的视频会缓存在本机。已配置过的本机直接执行第 3 步，连接失效时再执行第 2 步。
 
-如果使用 **steven → 8xA100 → 8xA100** 的路线，依次执行以下三条命令。每条都在上一条登录成功后的终端里执行：
+<details>
+<summary>维护者：给同事准备哪些内容？</summary>
 
-```bash
-# 1. 在自己电脑执行，替换跳板机地址。
-ssh -t -o RemoteCommand=none -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:8768:127.0.0.1:18768 steven@跳板机地址
+- `data/`：`groups.json`、`episode_metadata.json`、`cup_poses.npy`、`cup_angles.npy`、`smartphone_poses.npy`、`smartphone_angles.npy`。
+- `config.local.json`：按 `config.example.json` 填写。`data_root` 用 `./data`，`video_cache` 用 `./.cache/videos`；填好服务器数据集路径、跳板机地址和远端 Python 路径（需有 `av`）。当前路线的 `ssh_hops` 是 `["8xA100", "8xA100"]`，后续两跳需可免密连接。
+- 若第一跳需要密码，配置 `ssh_control_path` 为 `~/.ssh/yubi-viewer.sock`，提供下面的登录命令，并替换其中的跳板机地址：
 
-# 2. 登录 steven 后执行。
-ssh -t -o RemoteCommand=none -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:18768:127.0.0.1:18768 8xA100
+  ```bash
+  mkdir -p ~/.ssh
+  ssh -M -S ~/.ssh/yubi-viewer.sock -o ControlPersist=2h -o RemoteCommand=none -fN steven@跳板机地址
+  ```
 
-# 3. 进入中间机器后执行。
-ssh -t -o RemoteCommand=none -o ExitOnForwardFailure=yes \
-  -L 127.0.0.1:18768:127.0.0.1:8768 8xA100
-```
+这些资料私下交给有访问权限的同事，不提交到 GitHub。无需重新部署服务器。
 
-保持 SSH 连接，在**自己电脑**打开 **<http://127.0.0.1:8768/>**。
+</details>
 
-无需下载完整数据集；只传输正在看的记录。视频缓存保存在运行查看器的服务器上，不修改原始数据。
+## ② 本地查看：数据已下载到本机
 
-## ② Local：下载数据，设置本地路径
+1. **准备数据。** 下载有访问权限的 [YUBI 数据集](https://huggingface.co/datasets/airoa-org/yubi-corl2026-umi-arena)，保留 `meta`、`data`、`videos` 三个目录。完整数据约 **2.68 TB**。
+2. **填写位置。** 将 `config.example.json` 复制为 `config.local.json`，只把 `dataset_root` 改成数据集所在的完整路径，其他项保持默认。
+3. **第一次使用时，读取轨迹。** 将下面的路径换成同一个数据集路径，再运行（只做一次）：
 
-先下载有访问权限的 [YUBI 数据集](https://huggingface.co/datasets/airoa-org/yubi-corl2026-umi-arena)，保留以下目录结构。完整数据约 **2.68 TB**，请先确认磁盘空间。
+   ```bash
+   source .venv/bin/activate
+   python prepare_data.py --dataset /数据集所在路径 --output ./data
+   ```
 
-```text
-yubi-corl2026-umi-arena/
-├── meta/
-├── data/
-└── videos/
-```
+   如果已有查看器的 `data` 文件夹，请先确认它是配套缓存，不要重复生成或覆盖。
 
-在**自己电脑**执行：
+4. **打开程序和页面：**
 
-```bash
-git clone https://github.com/Kostov0129/YUBI_Visualization.git
-cd YUBI_Visualization
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+   ```bash
+   source .venv/bin/activate
+   python server.py --config config.local.json
+   ```
 
-python prepare_data.py --dataset /本地数据集路径 --output ./data
-cp config.example.json config.local.json
-```
+   在本机浏览器访问 **http://127.0.0.1:8768/**。这种方式不需要 SSH。
 
-按上面的配置示例，将 `dataset_root` 换成**本地数据集路径**，其他项不变。然后启动：
+## 怎么看？
 
-```bash
-python server.py --config config.local.json
-```
+**选任务 → 选记录 → 等视频加载 → 点「播放」。**
 
-打开 **<http://127.0.0.1:8768/>**，不需要 SSH。
+- 记录太多：在选择框里翻页，或输入页码。
+- 想看某一刻：拖动下面的进度条，三个视频和轨迹会一起跳转。
+- 第一次加载慢：稍等，程序正在准备这条视频。
+- 视频加载失败：在线方式先重新连接 SSH，再点「重试加载」。
 
-> `dataset_root` 指向原始数据集；`data_root` 指向导入生成的轨迹缓存。导入只需做一次，`--output` 必须是尚不存在的目录。
-
-## 怎么播放
-
-**选择任务 → 展开“选择记录” → 翻页或输入页码 → 选中记录 → 等三路视频就绪 → 播放。**
-
-进度条和倍速同时控制轨迹与视频。首次加载需要提取片段，之后使用缓存。暂停时也能旋转、缩放三维视角。视频可能是人持 UMI 的示范画面，不一定是固定机械臂执行。
-
-## 遇到问题
-
-- **网页打不开：**确认查看器进程和 SSH 连接仍在运行。
-- **端口被占用：**本机 8768 已被使用时，把 SSH 命令的第一个 `8768` 改成 `8769`，浏览器也访问 8769。跳板机 18768 冲突时，整条链路中的 `18768` 一起换成另一空闲端口。
-- **有轨迹、没视频：**检查 `dataset_root` 和文件读取权限；查看 `.cache/videos/<记录 UUID>/transfer.log`，修复后点“重试加载”。
-
-仓库只包含程序，不包含数据或登录资料。默认仅监听本机地址，通过 SSH 访问；GitHub 页面本身不能播放服务器视频。Python 3.12 启动流程已验证；第三方来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+使用期间保持程序运行。仓库只提供查看器，不包含数据和登录资料。第三方来源见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
