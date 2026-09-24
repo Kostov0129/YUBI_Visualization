@@ -1,0 +1,11 @@
+{
+  "data_root": "./data",
+  "dataset_root": "/path/to/yubi-corl2026-umi-arena",
+  "video_cache": "./.cache/videos",
+  "host": "127.0.0.1",
+  "port": 8768,
+  "ssh_host": "",
+  "ssh_hops": [],
+  "remote_python": "python3",
+  "ssh_control_path": ""
+}
