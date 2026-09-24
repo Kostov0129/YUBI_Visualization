@@ -138,4 +138,31 @@ class SharedConnectionTest(unittest.TestCase):
   with patch.object(setup,'shared_sockets',return_value=['/tmp/example.sock']),patch.object(setup.subprocess,'run',return_value=SimpleNamespace(returncode=255)):
    self.assertIsNone(setup.find_shared())
 
+class AutoConnectionTest(unittest.TestCase):
+ def test_all_automatic_routes_before_password(self):
+  from unittest.mock import patch
+  import setup_online as s
+  routes=[{'ssh_host':'direct'},{'ssh_host':'gateway'},{'ssh_host':'tail'}]
+  with patch.object(s,'find_shared',return_value=None),patch.object(s,'connection_candidates',return_value=routes),patch.object(s,'discover',side_effect=[None,None,routes[2]]) as probe,patch.object(s,'login') as login:
+   self.assertEqual(s.connect(),routes[2]);self.assertEqual(probe.call_count,3);login.assert_not_called()
+ def test_password_login_uses_persistent_socket(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as s
+  config={'ssh_host':'8xA100'}
+  with patch.object(s.subprocess,'run',return_value=SimpleNamespace(returncode=0)) as run,patch.object(s,'discover',side_effect=lambda c:c):
+   result=s.login(config);self.assertIn('ssh_control_path',result)
+   args=run.call_args.args[0];self.assertIn('-fN',args);self.assertNotIn('BatchMode=yes',args)
+ def test_failed_login_does_not_return_configuration(self):
+  from unittest.mock import patch
+  from types import SimpleNamespace
+  import setup_online as s
+  with patch.object(s.subprocess,'run',return_value=SimpleNamespace(returncode=255)),patch.object(s,'discover') as probe:
+   self.assertIsNone(s.login({'ssh_host':'8xA100'}));probe.assert_not_called()
+ def test_tailscale_transport_used_for_future_reads(self):
+  from unittest.mock import patch
+  import video_cache as v
+  with patch.object(v,'CONFIG',{'ssh_host':'8xA100','ssh_transport':'tailscale','ssh_control_path':'/tmp/yubi-test.sock','ssh_hops':[]}):
+   cmd=v.command('print(1)');self.assertEqual(cmd[:3],['tailscale','ssh','8xA100']);self.assertIn('/tmp/yubi-test.sock',cmd)
+
 if __name__=='__main__':unittest.main()
