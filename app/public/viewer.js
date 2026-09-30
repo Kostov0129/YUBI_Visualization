@@ -5,15 +5,52 @@ const $=id=>document.getElementById(id), host=$('scene');
 function color(v){const e=document.createElement('span');e.style.color=`var(${v})`;document.body.append(e);const c=getComputedStyle(e).color;e.remove();return c;}
 const colors=[color('--left'),color('--right')],neutral=color('--neutral');
 const scene=new THREE.Scene(),camera=new THREE.PerspectiveCamera(42,1,.001,100);camera.up.set(0,0,1);
-let renderer;try{renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));}catch(e){renderer=new SVGRenderer();renderer.setQuality('low');renderer.setClearColor(new THREE.Color(color('--bg')));}host.append(renderer.domElement);
+let renderer;try{renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true});renderer.setPixelRatio(Math.min(devicePixelRatio,2));}catch(e){renderer=new SVGRenderer();renderer.setQuality('low');renderer.setClearColor(new THREE.Color(color('--bg')));}host.append(renderer.domElement);
 const controls=new OrbitControls(camera,host);controls.enableDamping=false;controls.rotateSpeed=.65;controls.zoomSpeed=.7;controls.panSpeed=.65;scene.add(new THREE.AmbientLight(0xffffff,.8));const light=new THREE.DirectionalLight(0xffffff,.8);light.position.set(2,-3,5);scene.add(light);
 const world=new THREE.Group();scene.add(world);let dirty=true;let data=null,catalog=[],frame=0,playing=false,acc=0,last=0,loadToken=0,roots=[],armLine=null,bounds=new THREE.Box3();
 controls.addEventListener('change',()=>{dirty=true;});renderer.domElement.style.pointerEvents='none';
+let ik={segments:[]},ikToken=0,rangeStart=0,rangeEnd=0,paths=[],ikTimer=null;
+const failureColor='#ed354b';
+function drawPaths(){
+ for(const x of paths){world.remove(x);x.geometry.dispose();x.material.dispose();}paths=[];
+ if(!data)return;const chosen=$('ik-segment').value,segment=chosen==='all'?null:ik.segments[Number(chosen)];
+ rangeStart=segment?Math.max(0,segment.start-15):0;rangeEnd=segment?Math.min(data.frames-1,segment.end+15):data.frames-1;
+ const sources=data.mode==='raw'?[['left',data.poses.map(p=>p.slice(0,3))],['right',data.poses.map(p=>p.slice(7,10))]]:[[data.side,data.target.map(p=>p.slice(0,3))]];
+ bounds.makeEmpty();
+ for(const [side,points] of sources){
+  const base=line(points.slice(rangeStart,rangeEnd+1),colors[side==='left'?0:1]);paths.push(base);
+  for(let f=rangeStart;f<=rangeEnd;f++)bounds.expandByPoint(new THREE.Vector3(...points[f]));
+  if(!['both','dual',side].includes(ik.side))continue;
+  // Only edges with two failed endpoints are red; isolated failures get a dot.
+  for(const s of ik.segments){if(s.side!==side&&s.side!=='dual')continue;const lo=Math.max(rangeStart,s.start),hi=Math.min(rangeEnd,s.end);if(lo>hi)continue;
+   if(hi>lo){const red=line(points.slice(lo,hi+1),failureColor);red.material.depthTest=false;red.renderOrder=3;paths.push(red);}
+   for(let f=lo;f<=hi;f++){const dot=new THREE.Mesh(new THREE.SphereGeometry(.0035,6,4),new THREE.MeshBasicMaterial({color:failureColor,depthTest:false}));dot.position.fromArray(points[f]);dot.renderOrder=4;world.add(dot);paths.push(dot);}
+  }
+ }
+ bounds.expandByScalar(.12);$('time').min=rangeStart;$('time').max=rangeEnd;
+ $('legend').innerHTML='<span class="left">● 左手</span>　<span class="right">● 右手</span>'+(ik.segments.length?'　<span style="color:'+failureColor+'">● IK 搜索失败</span>':'')+'　网格 10 cm';dirty=true;
+}
+async function loadIK(){
+ clearTimeout(ikTimer);const token=++ikToken,uid=data?.uuid;ik={segments:[]};$('ik-scan').hidden=true;$('ik-segment').replaceChildren(new Option('整段轨迹','all'));$('ik-segment').disabled=true;drawPaths();
+ if(!uid)return;$('ik-status').textContent='读取 IK 检查结果…';
+ try{const r=await fetch('/api/ik?uuid='+encodeURIComponent(uid)+'&check='+encodeURIComponent($('ik-check').value)+'&kind='+$('ik-kind').value);if(!r.ok)throw Error('IK 结果暂不可用');const d=await r.json();if(token!==ikToken||data?.uuid!==uid)return;ik=d;
+  $('ik-segment').replaceChildren(new Option('整段轨迹','all'),...d.segments.map((s,i)=>new Option(s.label,String(i))));$('ik-segment').disabled=!d.segments.length;
+  $('ik-status').textContent=d.message+(d.anchor_id!=null?' · 参考起点 '+d.anchor_id:'')+(d.counts?` · 通过 ${d.counts.pass} 帧 / 失败 ${d.counts.fail} 帧 / 未知 ${d.counts.unknown} 帧`:'');drawPaths();
+  $('ik-scan').hidden=!d.can_scan;$('ik-scan').disabled=d.scan?.state==='running';
+  $('ik-scan').textContent=$('ik-kind').value==='continuity'?'本机检查连续衔接':'逐帧复查当前轨迹';
+  if(d.scan?.state==='running'){$('ik-status').textContent='正在本机逐帧复查当前轨迹…';ikTimer=setTimeout(loadIK,1500);}
+  if(d.scan?.state==='error')$('ik-status').textContent+=' · '+d.scan.message;
+ }catch(e){if(token===ikToken)$('ik-status').textContent=e.message;}
+}
+$('ik-check').onchange=()=>{playing=false;pauseVideos();$('play').textContent='播放';if($('mode').value!=='raw'&&$('mode').value!==$('ik-check').value){$('mode').value='raw';load();}else loadIK();};
+$('ik-kind').onchange=()=>{playing=false;pauseVideos();$('play').textContent='播放';if($('ik-kind').value==='continuity'&&$('mode').value!=='raw'){$('mode').value='raw';load();}else loadIK();};
+$('ik-segment').onchange=()=>{playing=false;pauseVideos();$('play').textContent='播放';drawPaths();frame=rangeStart;acc=0;fit();update();};
+$('ik-scan').onclick=async()=>{if(!data)return;const uid=data.uuid,check=$('ik-check').value,kind=$('ik-kind').value;$('ik-scan').disabled=true;try{const r=await fetch('/api/ik-scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({uuid:uid,check,kind})});if(!r.ok)throw Error('本机未配置逐帧 IK 复查环境');if(data?.uuid===uid&&$('ik-check').value===check&&$('ik-kind').value===kind)loadIK();}catch(e){$('ik-status').textContent=e.message;$('ik-scan').disabled=false;}};
 const gripper=await (await fetch('./gripper.json')).json();const simpleGripper=await (await fetch('./gripper-simple.json')).json();const practiceSuite=await (await fetch('./practice-suite.json')).json();const practiceIds=new Set(practiceSuite.tasks.flatMap(t=>t.recordings.map(r=>r.uuid)));
 function geometry(x){const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(x.vertices.flat(),3));g.setIndex(x.faces.flat());g.computeVertexNormals();return g;}
 const detailGeos=Object.fromEntries(Object.entries(gripper).map(([k,v])=>[k,geometry(v)]));
 const simpleGeos=Object.fromEntries(Object.entries(simpleGripper).map(([k,v])=>[k,geometry(v)]));let geos=simpleGeos;
-function clear(){while(world.children.length){const x=world.children[0];world.remove(x);x.traverse(o=>{if(o.geometry&&![...Object.values(simpleGeos),...Object.values(detailGeos)].includes(o.geometry))o.geometry.dispose();if(o.material)o.material.dispose();});}roots=[];armLine=null;}
+function clear(){while(world.children.length){const x=world.children[0];world.remove(x);x.traverse(o=>{if(o.geometry&&![...Object.values(simpleGeos),...Object.values(detailGeos)].includes(o.geometry))o.geometry.dispose();if(o.material)o.material.dispose();});}roots=[];armLine=null;paths=[];}
 function material(c){return new THREE.MeshLambertMaterial({color:c});}
 function hand(side){const group=new THREE.Group(),c=colors[side==='left'?0:1];const palm=new THREE.Mesh(new THREE.BoxGeometry(.044,.067,.0735),material(c));palm.position.set(-.022,0,-.02015);group.add(palm);const cam=new THREE.Mesh(new THREE.BoxGeometry(.035,.032,.042),material(neutral));cam.position.set(-.0175,0,.0426);group.add(cam);const fingers=[];for(const [f,s] of [['left',1],['right',-1]]){const pivot=new THREE.Group();pivot.position.set(-.016,s*.015,0);pivot.add(new THREE.Mesh(geos[side+'_'+f],material(c)));group.add(pivot);fingers.push(pivot);}group.userData={fingers,side};const axis=new THREE.AxesHelper(.045);group.add(axis);world.add(group);return group;}
 function pose(g,p){g.position.fromArray(p);g.quaternion.fromArray(p,3);}
@@ -22,27 +59,47 @@ function line(points,c){const l=new THREE.Line(new THREE.BufferGeometry().setFro
 function fit(){dirty=true;if(bounds.isEmpty())return;const center=bounds.getCenter(new THREE.Vector3()),size=bounds.getSize(new THREE.Vector3()).length();controls.target.copy(center);camera.position.copy(center).add(new THREE.Vector3(1,-1,.85).normalize().multiplyScalar(Math.max(size, .3)*1.05));camera.near=.001;camera.far=100;camera.updateProjectionMatrix();controls.update();}
 function grid(){for(let i=-10;i<=10;i++){line([[i/10,-1,0],[i/10,1,0]],color('--line'));line([[-1,i/10,0],[1,i/10,0]],color('--line'));}const axes=new THREE.AxesHelper(.2);world.add(axes);}
 function display(d){$('legend').innerHTML='<span class="left">● 左手</span>　<span class="right">● 右手</span>　网格 10 cm';clear();data=d;frame=0;playing=false;$('play').textContent='播放';$('time').disabled=false;$('play').disabled=false;$('time').max=d.frames-1;$('time').value=0;$('status').textContent=d.status;bounds.makeEmpty();grid();
-if(d.mode==='raw'){for(let i=0;i<2;i++){roots.push(hand(i?'right':'left'));const p=d.poses.map(r=>r.slice(i*7,i*7+3));line(p,colors[i]);p.forEach(v=>bounds.expandByPoint(new THREE.Vector3(...v)));}}else{roots.push(hand(d.side));line(d.target.map(p=>p.slice(0,3)),colors[d.side==='left'?0:1]);d.chain.forEach(row=>row.forEach(p=>bounds.expandByPoint(new THREE.Vector3(...p))));armLine=line(d.chain[0],neutral);}
-bounds.expandByScalar(.12);fit();update();}
+if(d.mode==='raw'){for(let i=0;i<2;i++)roots.push(hand(i?'right':'left'));}else{roots.push(hand(d.side));armLine=line(d.chain[0],neutral);}
+drawPaths();frame=rangeStart;fit();update();}
 function update(){dirty=true;if(!data)return;const q=data.angles[frame];if(data.mode==='raw'){roots.forEach((g,i)=>setHand(g,data.poses[frame].slice(i*7,i*7+7),q[i]));}else{setHand(roots[0],data.hand[frame],q[data.side==='left'?0:1]);armLine.geometry.setFromPoints(data.chain[frame].map(p=>new THREE.Vector3(...p)));}
 $('time').value=frame;$('clock').textContent=`${(frame/30).toFixed(2)} / ${((data.frames-1)/30).toFixed(2)} s`;$('detail').textContent=`${data.uuid} · episode ${data.episodes[frame][0]} / 帧 ${data.episodes[frame][1]} · 总帧 ${frame+1}/${data.frames} · 左夹爪 ${q[0].toFixed(3)} rad / 右夹爪 ${q[1].toFixed(3)} rad${q.some(x=>x<0||x>.94)?' · 角度超公开模型范围，可能发生重叠；按原值显示':''}`;syncVideos(!playing);}
-async function load(){const uid=$('record').value||data?.uuid;if(!uid)return;if($('record').selectedOptions.length)$('record-label').textContent=$('record').selectedOptions[0].textContent;$('record-picker').open=false;const token=++loadToken;++videoToken;clearTimeout(videoTimer);playing=false;pauseVideos();const mode=$('mode').value;$('status').textContent='读取本机记录…';try{
-const r=await fetch('/api/data?uuid='+uid+'&mode='+encodeURIComponent(mode));if(!r.ok)throw Error(await r.text());const d=await r.json();if(token!==loadToken)return;display(d);loadVideos(d.uuid);}catch(e){$('status').textContent='读取失败：'+e.message;}}
+async function load(){const uid=$('record').value||data?.uuid;if(!uid)return;if($('record').selectedOptions.length)$('record-label').textContent=$('record').selectedOptions[0].textContent;$('record-picker').open=false;const token=++loadToken;++ikToken;clearTimeout(ikTimer);++videoToken;clearTimeout(videoTimer);playing=false;pauseVideos();const mode=$('mode').value;$('status').textContent='读取本机记录…';try{
+const r=await fetch('/api/data?uuid='+uid+'&mode='+encodeURIComponent(mode));if(!r.ok)throw Error(await r.text());const d=await r.json();if(token!==loadToken)return;ik={segments:[]};$('ik-segment').replaceChildren(new Option('整段轨迹','all'));display(d);loadIK();loadVideos(d.uuid);}catch(e){$('status').textContent='读取失败：'+e.message;}}
 const pageSize=25;let recordPage=1;
+let screening={states:{}},screeningToken=0,screeningTimer;
+function recordBadge(uid){return {'fail':' · ✗ 连续未通过','pass':' · ✓ 连续通过','error':' · ! 检查异常','unknown':' · … 待筛查'}[screening.states[uid]||'unknown'];}
+function recordOption(g,i){const base=`记录 ${i+1} · ${(g.frames/30).toFixed(1)} 秒 · ${g.uuid.slice(0,8)}${practiceIds.has(g.uuid)?' · 官方 replay':''}`;const o=new Option(base+recordBadge(g.uuid),g.uuid);o.dataset.base=base;return o;}
+function refreshRecordBadges(){
+ for(const o of $('record').options){o.textContent=o.dataset.base+recordBadge(o.value);o.style.color=screening.states[o.value]==='fail'?'#d64141':'';}
+ const uid=data?.uuid;if(uid){const list=catalog.filter(g=>g.task===$('task').value&&($('scope').value==='all'||practiceIds.has(g.uuid)));const i=list.findIndex(g=>g.uuid===uid);if(i>=0)$('record-label').textContent=recordOption(list[i],i).textContent;}
+}
+async function loadScreening(){
+ clearTimeout(screeningTimer);const token=++screeningToken,check=$('ik-check').value;
+ try{const r=await fetch('/api/screening?check='+encodeURIComponent(check));if(!r.ok)throw Error('筛查标记暂不可用');const next=await r.json();if(token!==screeningToken)return;
+  const previous=screening.states[data?.uuid];screening=next;refreshRecordBadges();
+  const scope=check==='all'?'三种配置交集：Franka / OpenArm 左右单臂 + G2 参考双臂（共五项）':$('ik-check').selectedOptions[0].textContent;
+  $('screening-status').textContent=`连续性标签：${scope} · ${next.running?'正在筛查':'当前进度'} ${next.completed_checks}/${next.total_checks} 项 · 完整记录 ${next.completed_records}/${next.total_records} 条`;
+  if(data&&previous!==next.states[data.uuid]&&$('ik-kind').value==='continuity'&&check!=='none')loadIK();
+ }catch(e){if(token===screeningToken)$('screening-status').textContent=e.message;}
+ if(token===screeningToken)screeningTimer=setTimeout(loadScreening,10000);
+}
+$('ik-check').addEventListener('change',loadScreening);
+$('mode').addEventListener('change',()=>queueMicrotask(loadScreening));
 function records(reset=false,activate=true){
  const selected=$('record').value;const list=catalog.filter(g=>g.task===$('task').value&&($('scope').value==='all'||practiceIds.has(g.uuid)));
  const pages=Math.max(1,Math.ceil(list.length/pageSize));recordPage=reset?1:Math.max(1,Math.min(pages,recordPage));const start=(recordPage-1)*pageSize,visible=list.slice(start,start+pageSize);
- $('record').replaceChildren(...visible.map((g,i)=>new Option(`记录 ${start+i+1} · ${(g.frames/30).toFixed(1)} 秒 · ${g.uuid.slice(0,8)}${practiceIds.has(g.uuid)?' · 官方 replay':''}`,g.uuid)));
+ $('record').replaceChildren(...visible.map((g,i)=>recordOption(g,start+i)));
  $('page').value=recordPage;$('page').max=pages;$('page-info').textContent=`/ ${pages} 页 · 共 ${list.length} 条 · 每页 ${pageSize} 条`;$('prev-page').disabled=recordPage===1;$('next-page').disabled=recordPage===pages;
  if(!reset&&visible.some(x=>x.uuid===selected))$('record').value=selected;
+ refreshRecordBadges();
  if(visible.length){if(activate){if(!$('record').value)$('record').selectedIndex=0;load();}else if(!visible.some(x=>x.uuid===selected))$('record').selectedIndex=-1;}else {++loadToken;++videoToken;clearTimeout(videoTimer);playing=false;pauseVideos();for(const v of videos){v.removeAttribute('src');v.load();}$('record-label').textContent='暂无记录';data=null;clear();dirty=true;$('status').textContent='当前任务没有记录';$('detail').textContent='';$('clock').textContent='';$('time').disabled=true;$('play').disabled=true;}
 }
 function jumpPage(){const n=Number($('page').value);if(!Number.isInteger(n)||n<1){$('page').value=recordPage;return;}recordPage=n;records(false,false);}
 document.addEventListener('click',e=>{if(!$('record-picker').contains(e.target))$('record-picker').open=false;});$('record-picker').addEventListener('keydown',e=>{if(e.key==='Escape'){$('record-picker').open=false;$('record-label').focus();}});
 $('prev-page').onclick=()=>{recordPage--;records(false,false);};$('next-page').onclick=()=>{recordPage++;records(false,false);};$('jump-page').onclick=jumpPage;$('page').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();jumpPage();}};
-$('scope').onchange=()=>records(true);$('geometry').onchange=()=>{geos=$('geometry').value==='simple'?simpleGeos:detailGeos;if(data){const savedFrame=frame;display(data);frame=savedFrame;update();}else load();};$('task').onchange=()=>records(true);$('record').onchange=load;$('mode').onchange=load;$('reset').onclick=fit;$('time').oninput=()=>{pauseVideos();frame=+$('time').value;playing=false;$('play').textContent='播放';update();};$('play').onclick=()=>{if(!data)return;playing=!playing;if(frame===data.frames-1){frame=0;update();}acc=0;$('play').textContent=playing?'暂停':'播放';syncVideos(true);};
+$('scope').onchange=()=>records(true);$('geometry').onchange=()=>{geos=$('geometry').value==='simple'?simpleGeos:detailGeos;if(data){const savedFrame=frame;display(data);frame=savedFrame;update();}else load();};$('task').onchange=()=>records(true);$('record').onchange=load;$('mode').onchange=()=>{if($('mode').value!=='raw')$('ik-check').value=$('mode').value;load();};$('reset').onclick=fit;$('time').oninput=()=>{pauseVideos();frame=+$('time').value;playing=false;$('play').textContent='播放';update();};$('play').onclick=()=>{if(!data)return;playing=!playing;if(frame>=rangeEnd||frame<rangeStart){frame=rangeStart;update();}acc=0;$('play').textContent=playing?'暂停':'播放';syncVideos(true);};
 new ResizeObserver(()=>{dirty=true;const w=host.clientWidth,h=host.clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();}).observe(host);
-function tick(t){const dt=Math.min((t-last)/1000,.2);last=t;if(playing&&data){acc+=dt*30*+$('speed').value;const steps=Math.floor(acc);acc-=steps;if(steps){frame=Math.min(frame+steps,data.frames-1);update();if(frame===data.frames-1){playing=false;pauseVideos();syncVideos(true);$('play').textContent='播放';}}}const moved=controls.update();if(moved||dirty){renderer.render(scene,camera);dirty=false;}requestAnimationFrame(tick);}requestAnimationFrame(tick);
+function tick(t){const dt=Math.min((t-last)/1000,.2);last=t;if(playing&&data){acc+=dt*30*+$('speed').value;const steps=Math.floor(acc);acc-=steps;if(steps){frame=Math.min(frame+steps,rangeEnd);update();if(frame===rangeEnd){playing=false;pauseVideos();syncVideos(true);$('play').textContent='播放';}}}const moved=controls.update();if(moved||dirty){renderer.render(scene,camera);dirty=false;}requestAnimationFrame(tick);}requestAnimationFrame(tick);
 
 const videos=['left','center','right'].map(v=>$('video-'+v));let videoToken=0,videoUuid=null,videoTimer=null,lastVideoSync=0;
 function pauseVideos(){if(typeof videos!=='undefined')videos.forEach(v=>v.pause());}
@@ -57,3 +114,4 @@ async function loadVideos(uuid,retry=false){
 }
 videos.forEach(v=>{v.addEventListener('loadeddata',()=>syncVideos(true));v.addEventListener('seeked',()=>{if(!playing)syncVideos(true);});v.addEventListener('error',()=>{$('video-status').textContent='视频未能播放，请重试';$('video-retry').hidden=false;});});$('speed').onchange=()=>syncVideos(true);$('video-retry').onclick=()=>{if(data)loadVideos(data.uuid,true);};
 const appConfig=await (await fetch('/api/config')).json();$('mode').replaceChildren(...appConfig.modes.map(m=>new Option(m.label,m.value)));catalog=await (await fetch('/api/catalog')).json();$('scope').options[0].textContent=`两项任务全部 · ${catalog.length} 组`;$('scope').options[1].textContent=`官方 replay 子集 · ${catalog.filter(g=>practiceIds.has(g.uuid)).length} 组`;for(const o of $('task').options){o.textContent=(o.value==='cup'?'杯子放到盘子，再放回原位':'手机装盒')+` · ${catalog.filter(g=>g.task===o.value).length} 组`;}records();
+loadScreening();
