@@ -19,14 +19,33 @@ def load_config(path):
 
 class Handler(SimpleHTTPRequestHandler):
  def __init__(self,*args,dataset,**kwargs):self.dataset=dataset;super().__init__(*args,directory=str(PUBLIC),**kwargs)
+ def do_POST(self):
+  if self.path!='/api/ik-scan':self.send_error(404);return
+  if self.headers.get('Origin') and self.headers['Origin']!='http://'+self.headers.get('Host',''):
+   self.send_error(403);return
+  try:
+   size=int(self.headers.get('Content-Length','0'))
+   if not 0<size<4096:raise ValueError('Invalid request')
+   p=json.loads(self.rfile.read(size))
+   from ik_diagnostics import start_scan
+   result=start_scan(self.dataset,p['uuid'],p['check'],p.get('kind','pose'))
+   b=json.dumps(result).encode();self.send_response(202);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(b)));self.end_headers();self.wfile.write(b)
+  except (ValueError,KeyError):self.send_error(400,'Local reference IK is unavailable')
  def do_GET(self):
   u=urlparse(self.path)
   if not u.path.startswith('/api/'):return super().do_GET()
   try:
    if u.path=='/api/config':v={'modes':self.dataset.modes()}
    elif u.path=='/api/catalog':v=self.dataset.catalog()
+   elif u.path=='/api/screening':
+    from screening_index import index
+    p=parse_qs(u.query);v=index(self.dataset,p.get('check',['none'])[0])
    elif u.path=='/api/data':
     p=parse_qs(u.query);v=self.dataset.data(p['uuid'][0],p.get('mode',['raw'])[0])
+   elif u.path=='/api/ik':
+    from ik_diagnostics import diagnostic
+    p=parse_qs(u.query);uid=p['uuid'][0];g=self.dataset.index[uid]
+    v=diagnostic(self.dataset,uid,p.get('check',['none'])[0],g['frames'],p.get('kind',['pose'])[0])
    elif u.path=='/api/videos':
     p=parse_qs(u.query);uid=p['uuid'][0];g=self.dataset.index[uid]
     if p.get('retry')==['1']:

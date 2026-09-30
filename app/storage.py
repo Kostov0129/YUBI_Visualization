@@ -21,15 +21,16 @@ class Dataset:
   self.angles={t:np.load(self.root/(f+'_angles.npy'),mmap_mode='r') for t,f in [('cup','cup'),('phone','smartphone')] if t in self.poses}
   self.labels={};self.models={};self.setup={}
   labels=choose('ik/group_labels.jsonl','platform_labels_start_refit/group_labels.jsonl');models=choose('ik/models.json','models.json');setup=choose('ik/used_setup.json','incremental_start_refit/used_setup.json')
-  if all([labels,models,setup]):
-   self.labels={x['uuid']:x for x in map(json.loads,labels.read_text().splitlines())};self.models=json.loads(models.read_text())['models'];self.setup=json.loads(setup.read_text())['models']
+  if labels:self.labels={x['uuid']:x for x in map(json.loads,labels.read_text().splitlines())}
+  if all([models,setup]):
+   self.models=json.loads(models.read_text())['models'];self.setup=json.loads(setup.read_text())['models']
  def reference_path(self,path):
   p=Path(path)
   if not p.is_absolute():candidate=self.root/p
   else:
    try:p.relative_to(self.root);candidate=p
    except ValueError:
-    markers=['incremental_start_refit','incremental_strict','single_arm_strict','ik']
+    markers=['incremental_start_refit','incremental_strict','single_arm_strict','g2_dual_strict','ik']
     marker=next((x for x in markers if x in p.parts),None)
     if marker is None:raise ValueError('Reference path is outside configured data_root')
     candidate=self.root/Path(*p.parts[p.parts.index(marker):])
